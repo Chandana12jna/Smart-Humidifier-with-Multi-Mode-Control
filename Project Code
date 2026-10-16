@@ -1,0 +1,216 @@
+#include <DHT.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// ---------------- OLED ----------------
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+Adafruit_SSD1306 display(
+  SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1
+);
+
+// ---------------- DHT22 ----------------
+#define DHTPIN 2
+#define DHTTYPE DHT22
+
+DHT dht(DHTPIN, DHTTYPE);
+
+// ---------------- RELAY ----------------
+#define RELAY_PIN 7
+
+// Active-LOW relay
+const int RELAY_ON = LOW;
+const int RELAY_OFF = HIGH;
+
+// ---------------- SETTINGS ----------------
+float targetHumidity = 60.0;
+float hysteresis = 3.0;
+
+// Temperature below this: mist disabled
+const float MIN_TEMP = 12.0;
+
+// Pulse timing
+const unsigned long ON_TIME = 1000;
+const unsigned long OFF_TIME = 2000;
+
+// Sensor sampling
+const unsigned long READ_INTERVAL = 2000;
+
+unsigned long lastRead = 0;
+unsigned long lastPulseChange = 0;
+
+bool mistOn = false;
+bool pulseMode = false;
+
+String mode = "STARTING";
+
+// ---------------- RELAY CONTROL ----------------
+void setMist(bool state) {
+  mistOn = state;
+  digitalWrite(
+    RELAY_PIN,
+    state ? RELAY_ON : RELAY_OFF
+  );
+}
+
+// ---------------- SETUP ----------------
+void setup() {
+  Serial.begin(9600);
+
+  // Set OFF before starting normal operation
+  digitalWrite(RELAY_PIN, RELAY_OFF);
+  pinMode(RELAY_PIN, OUTPUT);
+  setMist(false);
+
+  dht.begin();
+
+  if (!display.begin(
+        SSD1306_SWITCHCAPVCC, 0x3C
+      )) {
+    Serial.println("OLED not found!");
+    while (true) {
+      setMist(false);
+    }
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Smart Humidifier");
+  display.println("Initializing...");
+  display.display();
+
+  delay(1000);
+}
+
+// ---------------- MAIN LOOP ----------------
+void loop() {
+  unsigned long now = millis();
+
+  // Read DHT22 every 2 seconds
+  if (now - lastRead < READ_INTERVAL) {
+    return;
+  }
+
+  lastRead = now;
+
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+
+  // -------- SENSOR ERROR SAFETY --------
+  if (isnan(humidity) || isnan(temperature) ||
+      humidity < 0 || humidity > 100) {
+
+    setMist(false);
+    pulseMode = false;
+    mode = "SENSOR ERROR";
+
+    Serial.println("Sensor error! Mist OFF.");
+
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("SMART HUMIDIFIER");
+    display.println();
+    display.println("DHT22 ERROR!");
+    display.println("Mist: OFF");
+    display.display();
+
+    return;
+  }
+
+  // -------- TEMPERATURE PROTECTION --------
+  if (temperature < MIN_TEMP) {
+    setMist(false);
+    pulseMode = false;
+    mode = "PAUSED";
+  }
+
+  // -------- HUMIDITY CONTROL --------
+  else {
+    // Start humidification below lower threshold
+    if (!mistOn && humidity < targetHumidity - hysteresis) {
+      pulseMode = false;
+      setMist(true);
+      mode = "BOOST";
+    }
+
+    // Stop humidification at upper threshold
+    else if (mistOn && humidity >= targetHumidity + hysteresis) {
+      pulseMode = false;
+      setMist(false);
+      mode = "STABLE";
+    }
+
+    // Pulse near the target
+    else if (humidity < targetHumidity &&
+             humidity >= targetHumidity - hysteresis) {
+
+      mode = "PULSING";
+
+      if (!pulseMode) {
+        pulseMode = true;
+        lastPulseChange = now;
+        setMist(true);
+      }
+
+      if (mistOn && now - lastPulseChange >= ON_TIME) {
+        setMist(false);
+        lastPulseChange = now;
+      }
+      else if (!mistOn &&
+               now - lastPulseChange >= OFF_TIME) {
+        setMist(true);
+        lastPulseChange = now;
+      }
+    }
+
+    // At or above target, keep mist off
+    else if (humidity >= targetHumidity) {
+      pulseMode = false;
+      setMist(false);
+      mode = "STABLE";
+    }
+  }
+
+  // -------- OLED DISPLAY --------
+  display.clearDisplay();
+  display.setCursor(0, 0);
+
+  display.println("SMART HUMIDIFIER");
+
+  display.print("Temp: ");
+  display.print(temperature, 1);
+  display.println(" C");
+
+  display.print("Humidity: ");
+  display.print(humidity, 1);
+  display.println(" %");
+
+  display.print("Target: ");
+  display.print(targetHumidity, 1);
+  display.println(" %");
+
+  display.print("Mode: ");
+  display.println(mode);
+
+  display.print("Mist: ");
+  display.println(mistOn ? "ON" : "OFF");
+
+  display.display();
+
+  // -------- SERIAL MONITOR --------
+  Serial.print("Temperature: ");
+  Serial.print(temperature, 1);
+
+  Serial.print(" C | Humidity: ");
+  Serial.print(humidity, 1);
+
+  Serial.print(" % | Mode: ");
+  Serial.print(mode);
+
+  Serial.print(" | Mist: ");
+  Serial.println(mistOn ? "ON" : "OFF");
+}
